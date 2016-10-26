@@ -9,7 +9,8 @@
             [cortex.network :as net]
             [cortex.registry :as reg]
             [cortex.optimise :as opt]
-            [mikera.image.core :as i])
+            [mikera.image.core :as i]
+            [mikera.vectorz.core :as veczore])
   (:import [java.io ByteArrayOutputStream]))
 
 (defn read-nippy [path]
@@ -59,7 +60,6 @@
   (forward [this input]
     (cp/calc this input))
 
-
   (backward [this input output-gradient]
      (let [input-gradient (or (:input-gradient this)
                               (b/new-array (m/shape input)))]
@@ -94,20 +94,27 @@
 ;;    (desc/linear 81)
 ;;    (mega-softmax (vec (repeat 9 9)))])
 
+;; (def network-desc
+;;   [(desc/input 9)
+;;    (desc/linear->relu 20)
+;;    (desc/linear->relu 20)
+;;    (desc/linear->relu 20)
+;;    (desc/linear->relu 20)
+;;    (desc/linear->relu 20)
+;;    (desc/linear->relu 20)
+;;    (desc/linear->relu 20)
+;;    (desc/linear->relu 20)
+;;    (desc/linear->relu 20)
+;;    (desc/linear->relu 20)
+;;    (desc/linear 81)
+;;    (mega-softmax (vec (repeat 9 9)))])
+
 (def network-desc
   [(desc/input 9)
-   (desc/linear->relu 20)
-   (desc/linear->relu 20)
-   (desc/linear->relu 20)
-   (desc/linear->relu 20)
-   (desc/linear->relu 20)
-   (desc/linear->relu 20)
-   (desc/linear->relu 20)
-   (desc/linear->relu 20)
-   (desc/linear->relu 20)
-   (desc/linear->relu 20)
-   (desc/linear 81)
-   (mega-softmax (vec (repeat 9 9)))])
+   (desc/linear->relu 100)
+   (desc/linear->relu 100)
+   (desc/linear (* 9 33))
+   (mega-softmax (vec (repeat 9 33)))])
 
 
 (defn run-single-input
@@ -116,10 +123,10 @@
     (net/run network [input])))
 
 (defn produce-answer
-  [v]
+  [possibilities v]
   (let [n (count v)]
     (vec (mapcat (fn [e]
-                   (assoc (vec (repeat n 0)) e 1))
+                   (assoc (vec (repeat possibilities 0)) e 1))
                  v))))
 
 (defn produce-noised-input
@@ -127,20 +134,22 @@
   (vec (map (fn [e] (if (< 0.5 (rand))
                       -1 e)) v)))
 
+(defn noise-fn
+  [v]
+  (let [idxs (take 3 (shuffle (range 10)))]
+    (reduce (fn [eax idx]
+              (assoc eax idx -1))
+            v
+            idxs)))
 
 (defn train-network
-  [input-seq]
-  (let [training-labels (mapv produce-answer input-seq)
-        training-data (mapv produce-noised-input input-seq)
-        network (desc/build-and-create-network network-desc)
-        loss-fn (opt/mse-loss)
-        optimizer (opt/adadelta-optimiser (cp/parameter-count network))
-        _ (println "STARTING")
-        network (net/train-until-error-stabilizes network optimizer loss-fn
-                                                  training-data training-labels
-                                                  10
-                                                  training-data training-labels)]
-    network))
+  [training-data]
+  (let [possibilities (inc (apply max (flatten training-data)))
+        training-labels (mapv (partial produce-answer possibilities) training-data)
+        network (desc/build-and-create-network network-desc)]
+    (println "Training network on" (count training-data) "data with" possibilities "possibilities.")
+    (net/train-until-error-stabilizes network training-data training-labels
+                                      :noise-fn noise-fn)))
 
 (defn serialize-net
   [net path]
@@ -168,33 +177,31 @@
                         (for [x (range (- w 2))
                               y (range (- h 2))]
                           [x y]))]
-    (m/mset! pic -1.0)
-    (doseq [[x y] points]
-      (let [s (m/submatrix pic x 3 y 3)
-            v (m/as-vector s)
-            thought (partition 9 (m/eseq (first (net/run net [v]))))
-            answers (mapv get-answer-from-dist thought)]
-        (doseq [i (range 9)]
-          (let [new-value (nth answers i)
-                x (+ x (mod i 3))
-                y (+ y (quot i 3))]
-            (if (or (= -1.0 (m/mget pic x y))
-                    (< (rand) 0.1)
-                    )
-              (m/mset! pic x y (nth answers i)))))))
+    (m/mset! pic 13.0)
+    (dotimes [pass 1]
+      (doseq [[x y] points]
+        (let [s (m/submatrix pic x 3 y 3)
+              v (m/as-vector s)
+              thought (partition 33 (m/eseq (first (net/run net [v]))))
+              answers (mapv get-answer-from-dist thought)]
+          (doseq [i (range 9)]
+            (let [new-value (nth answers i)
+                  x (+ x (mod i 3))
+                  y (+ y (quot i 3))]
+              (if (or (= 13.0 (m/mget pic x y)) (< 0 pass))
+                (m/mset! pic x y (nth answers i))))))))
     pic))
 
 (defn pic->image
   [pic]
   (let [[w h] (m/shape pic)
-        index (into {} (map (comp vec reverse)
-                            (read-string (slurp "resources/data/index.edn"))))
-        img (i/new-image w h)
-        pixels (i/get-pixels img)
+        index (read-string (slurp "resources/data/16x16-index.edn"))
+        img (i/new-image (* 16 w) (* 16 h))
         pic-values (m/as-vector pic)]
-    (dotimes [i (* w h)]
-      (aset pixels i (get index (Math/round (m/mget pic-values i)))))
-    (i/set-pixels img pixels)
+    (doseq [x (range w)
+            y (range h)]
+      (let [sub-image (i/sub-image img (* 16 x) (* 16 y) 16 16)]
+        (i/set-pixels sub-image (int-array (get index (Math/round (m/mget pic-values (+ x (* y w)))))))))
     img))
 
 ;; (m/set-current-implementation :vectorz)
@@ -207,3 +214,9 @@
     (let [name (str "mario-net-" run-name "-" i ".png")]
       (i/save (pic->image (get-picture net w h)) name)
       (println name))))
+
+(defn my-test
+  []
+  (let [img (i/new-image 16 16)]
+    (i/set-pixels img (int-array (get (read-string (slurp "resources/data/16x16-index.edn")) 13)))
+    (i/show img)))
